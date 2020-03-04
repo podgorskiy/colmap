@@ -31,11 +31,12 @@
 
 cmake_minimum_required(VERSION 3.0)
 
+cmake_policy(SET CMP0079 NEW)
+
 project(COLMAP)
 
 set(COLMAP_VERSION "3.6")
 set(COLMAP_VERSION_NUMBER "3600")
-
 
 ################################################################################
 # Include CMake dependencies
@@ -54,6 +55,8 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CMakeHelper.cmake NO_POLICY_SCOPE)
 # Options
 ################################################################################
 
+SET(CUDA_TOOLKIT_ROOT_DIR  /usr/lib/cuda)
+
 option(SIMD_ENABLED "Whether to enable SIMD optimizations" ON)
 option(OPENMP_ENABLED "Whether to enable OpenMP parallelization" ON)
 option(IPO_ENABLED "Whether to enable interprocedural optimization" ON)
@@ -62,9 +65,13 @@ option(OPENGL_ENABLED "Whether to enable OpenGL, if available" ON)
 option(TESTS_ENABLED "Whether to build test binaries" OFF)
 option(PROFILING_ENABLED "Whether to enable google-perftools linker flags" OFF)
 option(CGAL_ENABLED "Whether to enable the CGAL library" ON)
-option(BOOST_STATIC "Whether to enable static boost library linker flags" ON)
+option(BOOST_STATIC "Whether to enable static boost library linker flags" OFF)
 set(CUDA_ARCHS "Auto" CACHE STRING "List of CUDA architectures for which to \
 generate code, e.g., Auto, All, Maxwell, Pascal, ...")
+
+
+set (CMAKE_CXX_FLAGS "-fPIC ${CMAKE_CXX_FLAGS}")
+
 
 if(TESTS_ENABLED)
     enable_testing()
@@ -105,6 +112,8 @@ find_package(Glew REQUIRED)
 find_package(Git)
 
 find_package(CGAL QUIET)
+find_package (Python 3 COMPONENTS Interpreter Development REQUIRED)
+
 
 set(CUDA_MIN_VERSION "7.0")
 if(CUDA_ENABLED)
@@ -323,7 +332,12 @@ include_directories(
     ${COLMAP_INCLUDE_DIRS}
 )
 
+include_directories(
+    lib/pybind11/include
+)
 link_directories(${COLMAP_LINK_DIRS})
+
+include_directories(${Python_INCLUDE_DIRS} )
 
 add_subdirectory(lib)
 add_subdirectory(src)
