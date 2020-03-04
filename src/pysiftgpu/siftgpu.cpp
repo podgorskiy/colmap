@@ -45,6 +45,34 @@ std::shared_ptr<SiftExtractionOptions> make_extreme_options()
     return options.sift_extraction;
 }
 
+FeatureKeypoints ScaleKeypoints(const Bitmap& bitmap, int camera_width, int camera_height, const FeatureKeypoints& _keypoints) {
+  if (static_cast<size_t>(bitmap.Width()) != camera_width ||
+      static_cast<size_t>(bitmap.Height()) != camera_height) {
+  	FeatureKeypoints keypoints = _keypoints;
+    const float scale_x = static_cast<float>(camera_width) / bitmap.Width();
+    const float scale_y = static_cast<float>(camera_height) / bitmap.Height();
+    for (auto& keypoint : keypoints) {
+      keypoint.Rescale(scale_x, scale_y);
+    }
+    return keypoints;
+  }
+  return _keypoints;
+}
+
+FeatureKeypoints ScaleKeypointsInv(const Bitmap& bitmap, int camera_width, int camera_height, const FeatureKeypoints& _keypoints) {
+  if (static_cast<size_t>(bitmap.Width()) != camera_width ||
+      static_cast<size_t>(bitmap.Height()) != camera_height) {
+  	FeatureKeypoints keypoints = _keypoints;
+    const float scale_x = static_cast<float>(camera_width) / bitmap.Width();
+    const float scale_y = static_cast<float>(camera_height) / bitmap.Height();
+    for (auto& keypoint : keypoints) {
+      keypoint.Rescale(1.0 / scale_x, 1.0 / scale_y);
+    }
+    return keypoints;
+  }
+  return _keypoints;
+}
+
 Bitmap Resize(Bitmap bitmap, const std::shared_ptr<SiftExtractionOptions>& options)
 {
 	if (static_cast<int>(bitmap.Width()) > options->max_image_size || static_cast<int>(bitmap.Height()) > options->max_image_size)
@@ -187,6 +215,16 @@ static FeatureDescriptors TransformVLFeatToUBCFeatureDescriptors(
 }
 
 
+std::pair<FeatureDescriptors, FeatureKeypoints>  ExtractCovariantSiftFeaturesC(const std::shared_ptr<SiftExtractionOptions>& _options,
+                                     const Bitmap& bitmap)
+{
+	FeatureKeypoints keypoints;
+	FeatureDescriptors descriptors;
+	ExtractCovariantSiftFeaturesCPU(*_options, bitmap, &keypoints, &descriptors);
+	return std::make_pair(descriptors, keypoints);
+}
+
+
 FeatureDescriptors ComputeDescriptors(const SiftExtractionOptions& options, VlCovDet* covdet, const FeatureKeypoints& keypoints);
 
 std::pair<FeatureDescriptors, FeatureKeypoints>  ExtractCovariantSiftFeatures(const std::shared_ptr<SiftExtractionOptions>& _options,
@@ -288,7 +326,6 @@ std::pair<FeatureDescriptors, FeatureKeypoints>  ExtractCovariantSiftFeatures(co
 
 	return std::make_pair(ComputeDescriptors(options, covdet.get(), keypoints), keypoints);
 }
-
 
 FeatureDescriptors ExtractCovariantSiftFeaturesGivenKeypoints(const std::shared_ptr<SiftExtractionOptions>& _options,
                                      const Bitmap& bitmap, const FeatureKeypoints& keypoints)
@@ -578,6 +615,9 @@ PYBIND11_MODULE(siftgpu, m) {
 		;
 
     m.def("extract_covariant_sift", &ExtractCovariantSiftFeatures);
+    m.def("extract_covariant_sift_c", &ExtractCovariantSiftFeaturesC);
     m.def("extract_covariant_sift_given_keypoints", &ExtractCovariantSiftFeaturesGivenKeypoints);
     m.def("resize", &Resize);
+    m.def("scale_keypoints", &ScaleKeypoints);
+    m.def("scale_keypoints_inv", &ScaleKeypointsInv);
 }

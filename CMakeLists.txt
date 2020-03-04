@@ -70,9 +70,6 @@ set(CUDA_ARCHS "Auto" CACHE STRING "List of CUDA architectures for which to \
 generate code, e.g., Auto, All, Maxwell, Pascal, ...")
 
 
-set (CMAKE_CXX_FLAGS "-fPIC ${CMAKE_CXX_FLAGS}")
-
-
 if(TESTS_ENABLED)
     enable_testing()
 endif()
