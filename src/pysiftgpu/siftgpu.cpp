@@ -37,10 +37,10 @@ namespace py = pybind11;
 
 typedef py::array_t<uint8_t, py::array::c_style> ndarray_uint8;
 
-std::shared_ptr<SiftExtractionOptions> make_deafault_options()
+std::shared_ptr<SiftExtractionOptions> make_extreme_options()
 {
 	OptionManager options;
-	//options.ModifyForExtremeQuality();
+	options.ModifyForExtremeQuality();
     options.AddExtractionOptions();
     return options.sift_extraction;
 }
@@ -165,6 +165,293 @@ public:
 	std::shared_ptr<SiftGPU> sift_gpu;
 };
 
+
+// VLFeat uses a different convention to store its descriptors. This transforms
+// the VLFeat format into the original SIFT format that is also used by SiftGPU.
+static FeatureDescriptors TransformVLFeatToUBCFeatureDescriptors(
+    const FeatureDescriptors& vlfeat_descriptors) {
+  FeatureDescriptors ubc_descriptors(vlfeat_descriptors.rows(),
+                                     vlfeat_descriptors.cols());
+  const std::array<int, 8> q{{0, 7, 6, 5, 4, 3, 2, 1}};
+  for (FeatureDescriptors::Index n = 0; n < vlfeat_descriptors.rows(); ++n) {
+    for (int i = 0; i < 4; ++i) {
+      for (int j = 0; j < 4; ++j) {
+        for (int k = 0; k < 8; ++k) {
+          ubc_descriptors(n, 8 * (j + 4 * i) + q[k]) =
+              vlfeat_descriptors(n, 8 * (j + 4 * i) + k);
+        }
+      }
+    }
+  }
+  return ubc_descriptors;
+}
+
+
+FeatureDescriptors ComputeDescriptors(const SiftExtractionOptions& options, VlCovDet* covdet, const FeatureKeypoints& keypoints);
+
+std::pair<FeatureDescriptors, FeatureKeypoints>  ExtractCovariantSiftFeatures(const std::shared_ptr<SiftExtractionOptions>& _options,
+                                     const Bitmap& bitmap)
+{
+	SiftExtractionOptions options = *_options;
+	CHECK(options.Check());
+	CHECK(bitmap.IsGrey());
+
+	CHECK(!options.darkness_adaptivity);
+
+	// Setup covariant SIFT detector.
+	std::unique_ptr<VlCovDet, void (*)(VlCovDet*)> covdet(
+			vl_covdet_new(VL_COVDET_METHOD_DOG), &vl_covdet_delete);
+	if (!covdet)
+	{
+		return std::pair<FeatureDescriptors, FeatureKeypoints>();
+	}
+
+	const int kMaxOctaveResolution = 1000;
+	CHECK_LE(options.octave_resolution, kMaxOctaveResolution);
+
+	vl_covdet_set_first_octave(covdet.get(), options.first_octave);
+	vl_covdet_set_octave_resolution(covdet.get(), options.octave_resolution);
+	vl_covdet_set_peak_threshold(covdet.get(), options.peak_threshold);
+	vl_covdet_set_edge_threshold(covdet.get(), options.edge_threshold);
+
+	{
+		const std::vector<uint8_t> data_uint8 = bitmap.ConvertToRowMajorArray();
+		std::vector<float> data_float(data_uint8.size());
+		for (size_t i = 0; i < data_uint8.size(); ++i)
+		{
+			data_float[i] = static_cast<float>(data_uint8[i]) / 255.0f;
+		}
+		vl_covdet_put_image(covdet.get(), data_float.data(), bitmap.Width(),
+		                    bitmap.Height());
+	}
+
+	vl_covdet_detect(covdet.get(), options.max_num_features);
+
+	if (!options.upright)
+	{
+		if (options.estimate_affine_shape)
+		{
+			vl_covdet_extract_affine_shape(covdet.get());
+		}
+		else
+		{
+			vl_covdet_extract_orientations(covdet.get());
+		}
+	}
+
+	const int num_features = vl_covdet_get_num_features(covdet.get());
+	VlCovDetFeature* features = vl_covdet_get_features(covdet.get());
+
+	// Sort features according to detected octave and scale.
+	std::sort(
+			features, features + num_features,
+			[](const VlCovDetFeature& feature1, const VlCovDetFeature& feature2)
+			{
+				if (feature1.o == feature2.o)
+				{
+					return feature1.s > feature2.s;
+				}
+				else
+				{
+					return feature1.o > feature2.o;
+				}
+			});
+
+	const size_t max_num_features = static_cast<size_t>(options.max_num_features);
+
+	FeatureKeypoints keypoints;
+	// Copy detected keypoints and clamp when maximum number of features reached.
+	int prev_octave_scale_idx = std::numeric_limits<int>::max();
+	for (int i = 0; i < num_features; ++i)
+	{
+		FeatureKeypoint keypoint;
+		keypoint.x = features[i].frame.x + 0.5;
+		keypoint.y = features[i].frame.y + 0.5;
+		keypoint.a11 = features[i].frame.a11;
+		keypoint.a12 = features[i].frame.a12;
+		keypoint.a21 = features[i].frame.a21;
+		keypoint.a22 = features[i].frame.a22;
+		keypoints.push_back(keypoint);
+
+		const int octave_scale_idx =
+				features[i].o * kMaxOctaveResolution + features[i].s;
+		CHECK_LE(octave_scale_idx, prev_octave_scale_idx);
+
+		if (octave_scale_idx != prev_octave_scale_idx &&
+		    keypoints.size() >= max_num_features)
+		{
+			break;
+		}
+
+		prev_octave_scale_idx = octave_scale_idx;
+	}
+
+	return std::make_pair(ComputeDescriptors(options, covdet.get(), keypoints), keypoints);
+}
+
+
+FeatureDescriptors ExtractCovariantSiftFeaturesGivenKeypoints(const std::shared_ptr<SiftExtractionOptions>& _options,
+                                     const Bitmap& bitmap, const FeatureKeypoints& keypoints)
+{
+	SiftExtractionOptions options = *_options;
+	CHECK(options.Check());
+	CHECK(bitmap.IsGrey());
+
+	CHECK(!options.darkness_adaptivity);
+
+	// Setup covariant SIFT detector.
+	std::unique_ptr<VlCovDet, void (*)(VlCovDet*)> covdet(
+			vl_covdet_new(VL_COVDET_METHOD_DOG), &vl_covdet_delete);
+	if (!covdet)
+	{
+		return FeatureDescriptors();
+	}
+
+	const int kMaxOctaveResolution = 1000;
+	CHECK_LE(options.octave_resolution, kMaxOctaveResolution);
+
+	vl_covdet_set_first_octave(covdet.get(), options.first_octave);
+	vl_covdet_set_octave_resolution(covdet.get(), options.octave_resolution);
+	vl_covdet_set_peak_threshold(covdet.get(), options.peak_threshold);
+	vl_covdet_set_edge_threshold(covdet.get(), options.edge_threshold);
+
+	{
+		const std::vector<uint8_t> data_uint8 = bitmap.ConvertToRowMajorArray();
+		std::vector<float> data_float(data_uint8.size());
+		for (size_t i = 0; i < data_uint8.size(); ++i)
+		{
+			data_float[i] = static_cast<float>(data_uint8[i]) / 255.0f;
+		}
+		vl_covdet_put_image(covdet.get(), data_float.data(), bitmap.Width(),
+		                    bitmap.Height());
+	}
+
+	vl_covdet_detect(covdet.get(), options.max_num_features);
+
+	if (!options.upright)
+	{
+		if (options.estimate_affine_shape)
+		{
+			vl_covdet_extract_affine_shape(covdet.get());
+		}
+		else
+		{
+			vl_covdet_extract_orientations(covdet.get());
+		}
+	}
+	return ComputeDescriptors(options, covdet.get(), keypoints);
+}
+
+
+FeatureDescriptors ComputeDescriptors(const SiftExtractionOptions& options, VlCovDet* covdet, const FeatureKeypoints& keypoints)
+{
+	FeatureDescriptors descriptors;
+	{
+		descriptors.resize(keypoints.size(), 128);
+
+		const size_t kPatchResolution = 15;
+		const size_t kPatchSide = 2 * kPatchResolution + 1;
+		const double kPatchRelativeExtent = 7.5;
+		const double kPatchRelativeSmoothing = 1;
+		const double kPatchStep = kPatchRelativeExtent / kPatchResolution;
+		const double kSigma =
+				kPatchRelativeExtent / (3.0 * (4 + 1) / 2) / kPatchStep;
+
+		std::vector<float> patch(kPatchSide * kPatchSide);
+		std::vector<float> patchXY(2 * kPatchSide * kPatchSide);
+
+		float dsp_min_scale = 1;
+		float dsp_scale_step = 0;
+		int dsp_num_scales = 1;
+		if (options.domain_size_pooling)
+		{
+			dsp_min_scale = options.dsp_min_scale;
+			dsp_scale_step = (options.dsp_max_scale - options.dsp_min_scale) /
+			                 options.dsp_num_scales;
+			dsp_num_scales = options.dsp_num_scales;
+		}
+
+		Eigen::Matrix<float, Eigen::Dynamic, 128, Eigen::RowMajor>
+				scaled_descriptors(dsp_num_scales, 128);
+
+		std::unique_ptr<VlSiftFilt, void (*)(VlSiftFilt*)> sift(
+				vl_sift_new(16, 16, 1, 3, 0), &vl_sift_delete);
+		if (!sift)
+		{
+			return FeatureDescriptors();
+		}
+
+		vl_sift_set_magnif(sift.get(), 3.0);
+
+		for (size_t i = 0; i < keypoints.size(); ++i)
+		{
+			for (int s = 0; s < dsp_num_scales; ++s)
+			{
+				const double dsp_scale = dsp_min_scale + s * dsp_scale_step;
+
+				// VlFrameOrientedEllipse scaled_frame = features[i].frame;
+				VlFrameOrientedEllipse scaled_frame;
+				scaled_frame.x = keypoints[i].x - 0.5;
+				scaled_frame.y = keypoints[i].y - 0.5;
+
+				scaled_frame.a11 = keypoints[i].a11;
+				scaled_frame.a12 = keypoints[i].a12;
+				scaled_frame.a21 = keypoints[i].a21;
+				scaled_frame.a22 = keypoints[i].a22;
+
+				scaled_frame.a11 *= dsp_scale;
+				scaled_frame.a12 *= dsp_scale;
+				scaled_frame.a21 *= dsp_scale;
+				scaled_frame.a22 *= dsp_scale;
+
+				vl_covdet_extract_patch_for_frame(
+						covdet, patch.data(), kPatchResolution, kPatchRelativeExtent,
+						kPatchRelativeSmoothing, scaled_frame);
+
+				vl_imgradient_polar_f(patchXY.data(), patchXY.data() + 1, 2,
+				                      2 * kPatchSide, patch.data(), kPatchSide,
+				                      kPatchSide, kPatchSide);
+
+				vl_sift_calc_raw_descriptor(sift.get(), patchXY.data(),
+				                            scaled_descriptors.row(s).data(),
+				                            kPatchSide, kPatchSide, kPatchResolution,
+				                            kPatchResolution, kSigma, 0);
+			}
+
+			Eigen::Matrix<float, 1, 128> descriptor;
+			if (options.domain_size_pooling)
+			{
+				descriptor = scaled_descriptors.colwise().mean();
+			}
+			else
+			{
+				descriptor = scaled_descriptors;
+			}
+
+			if (options.normalization == SiftExtractionOptions::Normalization::L2)
+			{
+				descriptor = L2NormalizeFeatureDescriptors(descriptor);
+			}
+			else if (options.normalization ==
+			         SiftExtractionOptions::Normalization::L1_ROOT)
+			{
+				descriptor = L1RootNormalizeFeatureDescriptors(descriptor);
+			}
+			else
+			{
+				LOG(FATAL) << "Normalization type not supported";
+			}
+
+			descriptors.row(i) = FeatureDescriptorsToUnsignedByte(descriptor);
+		}
+
+		descriptors = TransformVLFeatToUBCFeatureDescriptors(descriptors);
+	}
+	return descriptors;
+}
+
+
+
 Bitmap CreateFromNumpy(ndarray_uint8 ndarray)
 {
 	const py::buffer_info& ndarray_info = ndarray.request();
@@ -192,7 +479,7 @@ Bitmap CreateFromNumpy(ndarray_uint8 ndarray)
 PYBIND11_MODULE(siftgpu, m) {
 	m.doc() = "siftgpu";
 
-    m.def("make_default_quality_options", &make_deafault_options, "Returns default quality settings for feature extraction");
+    m.def("make_extreme_options", &make_extreme_options, "Returns default quality settings for feature extraction");
 
     py::class_<SiftExtractionOptions, std::shared_ptr<SiftExtractionOptions> >(m, "SiftExtractionOptions")
 		.def(py::init<>())
@@ -289,4 +576,8 @@ PYBIND11_MODULE(siftgpu, m) {
         .def("compute_orientation", &FeatureKeypoint::ComputeOrientation)
         .def("compute_shear", &FeatureKeypoint::ComputeShear)
 		;
+
+    m.def("extract_covariant_sift", &ExtractCovariantSiftFeatures);
+    m.def("extract_covariant_sift_given_keypoints", &ExtractCovariantSiftFeaturesGivenKeypoints);
+    m.def("resize", &Resize);
 }
