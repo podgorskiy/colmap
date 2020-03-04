@@ -13,11 +13,9 @@ b.write('out.jpg')
 
 b.clone_as_grey().write('out_g.jpg')
 
-options = siftgpu.make_default_quality_options()
+options = siftgpu.make_extreme_options()
 
-extractor = siftgpu.SiftExtractor(options)
-
-descriptors, keypoints = extractor.extract_sift(b.clone_as_grey())
+descriptors, keypoints = siftgpu.extract_covariant_sift(options, b.clone_as_grey())
 
 for keypoint in keypoints:
     print(keypoint.x)
@@ -44,8 +42,7 @@ io.imwrite('sift.jpg', image)
 image = Image.fromarray(x.copy())
 draw = ImageDraw.Draw(image)
 
-extractor.set_keypoints(keypoints[:100], False)
-descriptors_new, keypoints = extractor.extract_sift(b.clone_as_grey())
+descriptors_new = siftgpu.extract_covariant_sift_given_keypoints(options, b.clone_as_grey(), keypoints[:100])
 
 for keypoint in keypoints:
     point_x = keypoint.x
@@ -54,10 +51,11 @@ for keypoint in keypoints:
     draw.line((point_x - 4, point_y - 4, point_x + 4, point_y + 4), fill=(255, 50, 50), width=2)
     draw.line((point_x - 4, point_y + 4, point_x + 4, point_y - 4), fill=(255, 50, 50), width=2)
 
-assert len(keypoints) == 100
 assert descriptors_new.shape[0] == 100
 
 io.imwrite('sift_from_keypoints.jpg', image)
 
 print(descriptors[:100])
 print(descriptors_new)
+
+assert np.all(np.equal(descriptors[:100], descriptors_new))
