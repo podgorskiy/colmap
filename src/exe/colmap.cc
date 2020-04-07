@@ -387,7 +387,11 @@ int RunFeatureExtractor(int argc, char** argv) {
   options.AddImageOptions();
   options.AddDefaultOption("image_list_path", &image_list_path);
   options.AddExtractionOptions();
+  options.ModifyForExtremeQuality();
   options.Parse(argc, argv);
+
+	options.sift_extraction->estimate_affine_shape = true;
+	options.sift_extraction->domain_size_pooling = true;
 
   ImageReaderOptions reader_options = *options.image_reader;
   reader_options.database_path = *options.database_path;
